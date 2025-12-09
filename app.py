@@ -19,7 +19,7 @@ from services.interactive_full import collect_mirrors_interactive_for_merchant
 #  СОЗДАЕМ ПРИЛОЖЕНИЕ
 # =======================
 
-app = FastAPI(title="Merchant mirrors API", version="0.3.0")
+app = FastAPI(title="Merchant mirrors API", version="0.4.0")
 
 
 # =====================================
@@ -151,7 +151,7 @@ async def collect_mirrors_interactive_endpoint(req: CollectInteractiveRequest):
 
 
 # =======================================
-#  СТАРЫЕ ЭНДПОИНТЫ (КАК И РАНЬШЕ)
+#  СТАРЫЕ ЭНДПОИНТЫ (КАК И РАНЬШЕ) + FIX фоновых задач
 # =======================================
 
 class BatchItem(BaseModel):
@@ -160,6 +160,7 @@ class BatchItem(BaseModel):
     country: str = "in"
     lang: str = "en"
     limit: int = 10
+    brand_pattern: Optional[str] = None
 
 
 class CollectBatchRequest(BaseModel):
@@ -184,13 +185,15 @@ def health():
 def collect_mirrors_all_async_endpoint(
     req: CollectAllRequest,
     background_tasks: BackgroundTasks,
-    db=Depends(get_db),
 ):
     """
-    Запускает сбор зеркал для всех мерчантов в фоне.
-    Если сигнатура collect_mirrors_for_all другая — подправь вызов.
+    Запускает сбор зеркал для всех дефолтных мерчантов в фоне.
+    Использует get_default_merchants() внутри mirrors.py.
     """
-    background_tasks.add_task(collect_mirrors_for_all, db, req.merchants, req.limit)
+    background_tasks.add_task(
+        collect_mirrors_for_all,
+        limit=req.limit,
+    )
     return {"ok": True}
 
 
@@ -201,12 +204,19 @@ def collect_mirrors_all_async_endpoint(
 def collect_mirrors_batch_endpoint(
     req: CollectBatchRequest,
     background_tasks: BackgroundTasks,
-    db=Depends(get_db),
 ):
     """
     Запускает сбор зеркал для батча мерчантов.
+    Параметр limit берём максимальный из items, чтобы не обрезать выдачу.
     """
-    background_tasks.add_task(collect_mirrors_for_batch, db, req.items)
+    max_limit = max((item.limit for item in req.items), default=10)
+
+    background_tasks.add_task(
+        collect_mirrors_for_batch,
+        items=req.items,
+        limit=max_limit,
+        follow_redirects=True,
+    )
     return {"ok": True}
 
 
