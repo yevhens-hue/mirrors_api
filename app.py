@@ -216,12 +216,26 @@ def collect_mirrors_batch_endpoint(
 )
 def list_mirrors(
     limit: int = 100,
+    country: Optional[str] = None,
+    merchant: Optional[str] = None,
     db=Depends(get_db),
 ):
     """
-    Возвращает список зеркал из БД.
-    Mirror — SQLAlchemy-модель, поэтому НЕ используем её как response_model.
-    FastAPI сам сериализует объекты в JSON.
+    Возвращает список зеркал из БД
+    с возможностью фильтра по стране и мерчанту.
+
+    Примеры:
+      /mirrors?limit=100
+      /mirrors?country=in
+      /mirrors?country=ar&merchant=1win
     """
-    mirrors = db.query(Mirror).limit(limit).all()
+    query = db.query(Mirror)
+
+    if country:
+        query = query.filter(Mirror.country == country)
+
+    if merchant:
+        query = query.filter(Mirror.merchant == merchant)
+
+    mirrors = query.limit(limit).all()
     return mirrors
