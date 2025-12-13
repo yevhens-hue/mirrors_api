@@ -80,7 +80,7 @@ async def serper_search(
     """
     url = "https://google.serper.dev/search"
     headers = {
-        "X-API-KEY": settings.serper_api_key,
+        "X-API-KEY": settings.SERPER_API_KEY,  # <-- ВАЖНО: используем имя переменной из config.py
         "Content-Type": "application/json",
     }
     payload = {
