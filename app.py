@@ -1,4 +1,5 @@
 from typing import List, Optional
+import asyncio
 
 from fastapi import FastAPI, BackgroundTasks, Depends
 from pydantic import BaseModel, HttpUrl
@@ -19,7 +20,28 @@ from services.interactive_full import collect_mirrors_interactive_for_merchant
 #  СОЗДАЕМ ПРИЛОЖЕНИЕ
 # =======================
 
-app = FastAPI(title="Merchant mirrors API", version="0.4.0")
+app = FastAPI(title="Merchant mirrors API", version="0.5.0")
+
+
+# =======================
+#  УТИЛИТА: запуск async в BackgroundTasks
+# =======================
+
+def run_async(coro):
+    """
+    BackgroundTasks не await-ит корутины.
+    Поэтому мы принудительно запускаем async-код через asyncio.run().
+    """
+    try:
+        asyncio.run(coro)
+    except RuntimeError:
+        # Если вдруг уже есть loop (редко, но бывает), используем новый loop вручную
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
 
 # =====================================
@@ -62,10 +84,6 @@ class ResolveUrlBatchResponseItem(BaseModel):
     summary="Resolve Url Endpoint",
 )
 async def resolve_url_endpoint(req: ResolveUrlRequest):
-    """
-    Открывает страницу через Playwright,
-    отслеживает редиректы и пытается нажать типовые кнопки.
-    """
     try:
         final_url, redirects = await resolve_single_url(
             url=str(req.url),
@@ -95,9 +113,6 @@ async def resolve_url_endpoint(req: ResolveUrlRequest):
     summary="Resolve Url Batch Endpoint",
 )
 async def resolve_url_batch_endpoint(req: ResolveUrlBatchRequest):
-    """
-    Прогоняет список URL одного мерчанта через Playwright.
-    """
     results = await resolve_urls_for_merchant(
         merchant=req.merchant,
         urls=[str(u) for u in req.urls],
@@ -126,12 +141,6 @@ class CollectInteractiveRequest(BaseModel):
     summary="Collect Mirrors Interactive",
 )
 async def collect_mirrors_interactive_endpoint(req: CollectInteractiveRequest):
-    """
-    Полный интерактивный сбор зеркал для одного мерчанта:
-      1. Поиск доменов через Serper.dev
-      2. Прогонка каждого URL через Playwright (клики, редиректы)
-      3. Возвращаем финальный список зеркал
-    """
     results = await collect_mirrors_interactive_for_merchant(
         merchant=req.merchant,
         keywords=req.keywords,
@@ -151,7 +160,7 @@ async def collect_mirrors_interactive_endpoint(req: CollectInteractiveRequest):
 
 
 # =======================================
-#  СТАРЫЕ ЭНДПОИНТЫ (КАК И РАНЬШЕ) + FIX фоновых задач
+#  BATCH / ALL (фон) + SYNC endpoint для диагностики
 # =======================================
 
 class BatchItem(BaseModel):
@@ -168,8 +177,7 @@ class CollectBatchRequest(BaseModel):
 
 
 class CollectAllRequest(BaseModel):
-    """При необходимости адаптируй поля под свою логику."""
-    merchants: Optional[List[str]] = None
+    merchants: Optional[List[str]] = None  # сейчас в mirrors.py не используется
     limit: int = 10
 
 
@@ -186,38 +194,48 @@ def collect_mirrors_all_async_endpoint(
     req: CollectAllRequest,
     background_tasks: BackgroundTasks,
 ):
-    """
-    Запускает сбор зеркал для всех дефолтных мерчантов в фоне.
-    Использует get_default_merchants() внутри mirrors.py.
-    """
-    background_tasks.add_task(
-        collect_mirrors_for_all,
-        limit=req.limit,
-    )
+    # Запускаем async через run_async
+    background_tasks.add_task(run_async, collect_mirrors_for_all(limit=req.limit))
     return {"ok": True}
 
 
 @app.post(
     "/collect_mirrors_batch",
-    summary="Collect Mirrors Batch",
+    summary="Collect Mirrors Batch (async background)",
 )
 def collect_mirrors_batch_endpoint(
     req: CollectBatchRequest,
     background_tasks: BackgroundTasks,
 ):
-    """
-    Запускает сбор зеркал для батча мерчантов.
-    Параметр limit берём максимальный из items, чтобы не обрезать выдачу.
-    """
+    # Берём max limit из items, чтобы не обрезать
     max_limit = max((item.limit for item in req.items), default=10)
 
+    # Запускаем async через run_async
     background_tasks.add_task(
-        collect_mirrors_for_batch,
+        run_async,
+        collect_mirrors_for_batch(
+            items=req.items,
+            limit=max_limit,
+            follow_redirects=True,
+        ),
+    )
+    return {"ok": True}
+
+
+# 🔥 ВАЖНО: синхронный (не фон) эндпоинт для проверки, что сбор реально идёт
+# Его можно дернуть из браузера/n8n и получить created/updated сразу.
+@app.post(
+    "/collect_mirrors_batch_sync",
+    summary="Collect Mirrors Batch (wait for result)",
+)
+async def collect_mirrors_batch_sync_endpoint(req: CollectBatchRequest):
+    max_limit = max((item.limit for item in req.items), default=10)
+    result = await collect_mirrors_for_batch(
         items=req.items,
         limit=max_limit,
         follow_redirects=True,
     )
-    return {"ok": True}
+    return result
 
 
 @app.get(
@@ -230,15 +248,6 @@ def list_mirrors(
     merchant: Optional[str] = None,
     db=Depends(get_db),
 ):
-    """
-    Возвращает список зеркал из БД
-    с возможностью фильтра по стране и мерчанту.
-
-    Примеры:
-      /mirrors?limit=100
-      /mirrors?country=in
-      /mirrors?country=ar&merchant=1win
-    """
     query = db.query(Mirror)
 
     if country:
