@@ -20,7 +20,7 @@ from services.interactive_full import collect_mirrors_interactive_for_merchant
 #  СОЗДАЕМ ПРИЛОЖЕНИЕ
 # =======================
 
-app = FastAPI(title="Merchant mirrors API", version="0.5.0")
+app = FastAPI(title="Merchant mirrors API", version="0.6.0")
 
 
 # =======================
@@ -30,12 +30,12 @@ app = FastAPI(title="Merchant mirrors API", version="0.5.0")
 def run_async(coro):
     """
     BackgroundTasks не await-ит корутины.
-    Поэтому мы принудительно запускаем async-код через asyncio.run().
+    Поэтому мы запускаем async-код через asyncio.run().
     """
     try:
         asyncio.run(coro)
     except RuntimeError:
-        # Если вдруг уже есть loop (редко, но бывает), используем новый loop вручную
+        # Если loop уже существует (редко), используем новый loop вручную
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
@@ -84,6 +84,10 @@ class ResolveUrlBatchResponseItem(BaseModel):
     summary="Resolve Url Endpoint",
 )
 async def resolve_url_endpoint(req: ResolveUrlRequest):
+    """
+    Открывает страницу через Playwright,
+    отслеживает редиректы и пытается нажать типовые кнопки.
+    """
     try:
         final_url, redirects = await resolve_single_url(
             url=str(req.url),
@@ -113,6 +117,9 @@ async def resolve_url_endpoint(req: ResolveUrlRequest):
     summary="Resolve Url Batch Endpoint",
 )
 async def resolve_url_batch_endpoint(req: ResolveUrlBatchRequest):
+    """
+    Прогоняет список URL одного мерчанта через Playwright.
+    """
     results = await resolve_urls_for_merchant(
         merchant=req.merchant,
         urls=[str(u) for u in req.urls],
@@ -141,6 +148,12 @@ class CollectInteractiveRequest(BaseModel):
     summary="Collect Mirrors Interactive",
 )
 async def collect_mirrors_interactive_endpoint(req: CollectInteractiveRequest):
+    """
+    Полный интерактивный сбор зеркал для одного мерчанта:
+      1. Поиск доменов через Serper.dev
+      2. Прогонка каждого URL через Playwright (клики, редиректы)
+      3. Возвращаем финальный список зеркал
+    """
     results = await collect_mirrors_interactive_for_merchant(
         merchant=req.merchant,
         keywords=req.keywords,
@@ -160,7 +173,7 @@ async def collect_mirrors_interactive_endpoint(req: CollectInteractiveRequest):
 
 
 # =======================================
-#  BATCH / ALL (фон) + SYNC endpoint для диагностики
+#  BATCH / ALL + SYNC endpoint для диагностики
 # =======================================
 
 class BatchItem(BaseModel):
@@ -194,7 +207,6 @@ def collect_mirrors_all_async_endpoint(
     req: CollectAllRequest,
     background_tasks: BackgroundTasks,
 ):
-    # Запускаем async через run_async
     background_tasks.add_task(run_async, collect_mirrors_for_all(limit=req.limit))
     return {"ok": True}
 
@@ -207,10 +219,8 @@ def collect_mirrors_batch_endpoint(
     req: CollectBatchRequest,
     background_tasks: BackgroundTasks,
 ):
-    # Берём max limit из items, чтобы не обрезать
     max_limit = max((item.limit for item in req.items), default=10)
 
-    # Запускаем async через run_async
     background_tasks.add_task(
         run_async,
         collect_mirrors_for_batch(
@@ -222,8 +232,6 @@ def collect_mirrors_batch_endpoint(
     return {"ok": True}
 
 
-# 🔥 ВАЖНО: синхронный (не фон) эндпоинт для проверки, что сбор реально идёт
-# Его можно дернуть из браузера/n8n и получить created/updated сразу.
 @app.post(
     "/collect_mirrors_batch_sync",
     summary="Collect Mirrors Batch (wait for result)",
@@ -238,16 +246,28 @@ async def collect_mirrors_batch_sync_endpoint(req: CollectBatchRequest):
     return result
 
 
+# =======================================
+#  /mirrors: фильтры + сортировка по свежести
+# =======================================
+
 @app.get(
     "/mirrors",
     summary="List Mirrors",
 )
 def list_mirrors(
     limit: int = 100,
+    offset: int = 0,
     country: Optional[str] = None,
     merchant: Optional[str] = None,
     db=Depends(get_db),
 ):
+    """
+    Примеры:
+      /mirrors?limit=100
+      /mirrors?country=in&limit=100
+      /mirrors?country=ar&merchant=stake&limit=100
+      /mirrors?country=ar&limit=100&offset=100
+    """
     query = db.query(Mirror)
 
     if country:
@@ -256,5 +276,10 @@ def list_mirrors(
     if merchant:
         query = query.filter(Mirror.merchant == merchant)
 
-    mirrors = query.limit(limit).all()
+    mirrors = (
+        query.order_by(Mirror.last_seen_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return mirrors
