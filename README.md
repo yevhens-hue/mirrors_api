@@ -12,3 +12,6 @@ A resilient Python routing API designed to handle high availability and load bal
 pip install -r requirements.txt
 python router.py --config mirrors.json
 ```
+
+
+<!-- activity-sync: 2026-08-28 -->
